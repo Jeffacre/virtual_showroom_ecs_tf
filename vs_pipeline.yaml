@@ -1,0 +1,154 @@
+name: Deploy ECS Cluster with ECR and Launch Docker Services
+
+on:
+  push:
+    branches:
+      - main  # Adjust to the branch you use for deployment
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  terraform_plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: 'eu-west-1'  # Your target AWS region
+      PROJECT: ${{ secrets.PROJECT }}
+      SDLC: ${{ secrets.SDLC }}
+      VERSION: ${{ secrets.VERSION }}
+      COMPANY: ${{ secrets.COMPANY }}
+      CHARGEBACK: ${{ secrets.CHARGEBACK }}
+      TERRAFORM_PATH: ${{ secrets.TERRAFORM_PATH }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: "1.0.0"  # Specify your Terraform version here
+
+      - name: Terraform Init
+        id: init
+        run: terraform init -backend-config=${{ secrets.TERRAFORM_PATH }}/backend.tf
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate ${{ secrets.TERRAFORM_PATH }}
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -var-file=${{ secrets.TERRAFORM_PATH }}/terraform.tfvars -out=${{ secrets.PROJECT }}_plan.tfplan ${{ secrets.TERRAFORM_PATH }}
+
+      - name: Save Plan Output to JSON
+        id: save_plan
+        run: |
+          terraform show -json ${{ secrets.PROJECT }}_plan.tfplan > ${{ secrets.PROJECT }}_plan.json
+
+      - name: Upload Plan to S3
+        run: |
+          aws s3 cp ${{ secrets.PROJECT }}_plan.tfplan s3://${{ secrets.S3_BUCKET_NAME }}/terraform/plans/${{ secrets.PROJECT }}-${{ secrets.SDLC }}-${{ secrets.VERSION }}_plan.tfplan
+          aws s3 cp ${{ secrets.PROJECT }}_plan.json s3://${{ secrets.S3_BUCKET_NAME }}/terraform/plans/${{ secrets.PROJECT }}-${{ secrets.SDLC }}-${{ secrets.VERSION }}_plan.json
+
+      - name: Upload Plan File to GitHub Artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: terraform-plan-tfplan
+          path: ${{ secrets.PROJECT }}_plan.tfplan
+
+      - name: Upload Plan JSON to GitHub Artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: terraform-plan-json
+          path: ${{ secrets.PROJECT }}_plan.json
+
+  manual_approval:
+    name: Approval Gate
+    needs: terraform_plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Approval Request
+        run: |
+          echo "Please review the Terraform plan and approve this step before applying changes."
+
+  terraform_apply:
+    name: Terraform Apply
+    needs: manual_approval
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: 'eu-west-1'  # Your target AWS region
+      PROJECT: ${{ secrets.PROJECT }}
+      SDLC: ${{ secrets.SDLC }}
+      VERSION: ${{ secrets.VERSION }}
+      COMPANY: ${{ secrets.COMPANY }}
+      CHARGEBACK: ${{ secrets.CHARGEBACK }}
+      TERRAFORM_PATH: ${{ secrets.TERRAFORM_PATH }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: "1.0.0"  # Specify your Terraform version here
+
+      - name: Download Plan File
+        uses: actions/download-artifact@v2
+        with:
+          name: terraform-plan-tfplan
+          path: .
+
+      - name: Terraform Init
+        id: init
+        run: terraform init -backend-config=${{ secrets.TERRAFORM_PATH }}/backend.tf
+
+      - name: Terraform Apply
+        id: apply
+        run: terraform apply -var-file=${{ secrets.TERRAFORM_PATH }}/terraform.tfvars -auto-approve ${{ secrets.PROJECT }}_plan.tfplan
+
+  bootstrap:
+    name: Push Docker Images and Launch Services
+    needs: terraform_apply
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: 'eu-west-1'  # Your target AWS region
+      PROJECT: ${{ secrets.PROJECT }}
+      SDLC: ${{ secrets.SDLC }}
+      VERSION: ${{ secrets.VERSION }}
+      COMPANY: ${{ secrets.COMPANY }}
+      CHARGEBACK: ${{ secrets.CHARGEBACK }}
+      DOCKER_IMAGE1_PATH: ${{ secrets.DOCKER_IMAGE1_PATH }}
+      DOCKER_IMAGE2_PATH: ${{ secrets.DOCKER_IMAGE2_PATH }}
+      S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+
+    steps:
+      - name: Login to ECR
+        run: |
+          $(aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin ${aws_ecr_repository.docker_image1_repo.repository_url})
+          $(aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin ${aws_ecr_repository.docker_image2_repo.repository_url})
+
+      - name: Build and Push Docker Image 1
+        run: |
+          docker build -t docker_image1 ${{ secrets.DOCKER_IMAGE1_PATH }}
+          docker tag docker_image1:latest ${aws_ecr_repository.docker_image1_repo.repository_url}:latest
+          docker push ${aws_ecr_repository.docker_image1_repo.repository_url}:latest
+
+      - name: Build and Push Docker Image 2
+        run: |
+          docker build -t docker_image2 ${{ secrets.DOCKER_IMAGE2_PATH }}
+          docker tag docker_image2:latest ${aws_ecr_repository.docker_image2_repo.repository_url}:latest
+          docker push ${aws_ecr_repository.docker_image2_repo.repository_url}:latest

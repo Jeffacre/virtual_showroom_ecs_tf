@@ -1,0 +1,21 @@
+Additional Notes
+Create the S3 Bucket:
+Ensure that the S3 bucket for storing the state file is already created.
+bash
+Copy code
+aws s3 mb s3://your-terraform-state-bucket --region eu-west-1
+
+GitHub Secrets:
+Make sure that the following secrets are defined:
+
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+S3_BUCKET_NAME
+PROJECT
+SDLC
+VERSION
+COMPANY
+CHARGEBACK
+TERRAFORM_PATH
+DOCKER_IMAGE1_PATH
+DOCKER_IMAGE2_PATH
